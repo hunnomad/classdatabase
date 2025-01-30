@@ -68,4 +68,11 @@ class Database {
     }
 }
 
+
+$sql = "SQL COMMAND";
+$query = $pdo->prepare($sql);
+$query->bindParam(':',$xxx,PDO::PARAM_STR);
+$query->execute();
+$r = $query->fetch(PDO::FETCH_OBJ);
+
 ?>
