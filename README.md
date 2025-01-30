@@ -6,3 +6,5 @@ A universal MySQL database connection class.
 
 ```sh
 composer require hunnomad/classdatabase
+
+### Last updated: 2025.01.30
