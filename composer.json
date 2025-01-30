@@ -1,0 +1,21 @@
+{
+    "name": "hunnomad/classdatabase",
+    "description": "Universal MySQL database connection class",
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+      {
+        "name": "Zsolt Boszormenyi",
+        "email": "hunnomad@gmail.com"
+      }
+    ],
+    "autoload": {
+      "psr-4": {
+        "HunNomad\\Database\\": "src/"
+      }
+    },
+    "require": {
+      "php": ">=8.0",
+      "ext-pdo": "*"
+    }
+  }
