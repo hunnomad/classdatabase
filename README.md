@@ -1,42 +1,5 @@
 # classDatabase
 
-![PHP Version](https://img.shields.io/badge/php-%5E8.1-blue)
-![PDO Support](https://img.shields.io/badge/pdo-mysql%20%7C%20pgsql-brightgreen)
-![License](https://img.shields.io/github/license/hunnomad/classdatabase)
-![Composer](https://img.shields.io/packagist/v/hunnomad/classdatabase)
-![Build](https://img.shields.io/badge/build-passing-success)
-
-A universal **PDO-based** database connection class with support for **MySQL** and **PostgreSQL**.
-
-## Installation
-
-```sh
-composer require hunnomad/classdatabase
-```
-
-##### Usage:
-
-```php
-<?php
-require __DIR__ . '/vendor/autoload.php';
-
-use HunNomad\Database\Database;
-
-$db = new Database("localhost", "mydb", "user", "password", "3306");
-$pdo = $db->getConnection();
-
-$sql = "SQL COMMAND";
-$query = $pdo->prepare($sql);
-$query->bindParam(':param', $xxx, PDO::PARAM_STR);
-$query->execute();
-$r = $query->fetch(PDO::FETCH_OBJ);
-?>
-```
-
-
-
-# classDatabase
-
 A universal **PDO-based** database connection class with support for **MySQL** and **PostgreSQL**.
 
 ## Features
