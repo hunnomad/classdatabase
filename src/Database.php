@@ -8,65 +8,71 @@ use PDOException;
 class Database {
 
     private ?PDO $connect = null;
+    private string $driver;
 
     public function __construct(
         private string $host,
         private string $dbname,
         private string $user,
         private string $password,
-        private string $port
-    ) {}
+        private string $port,
+        string $driver = 'mysql' // Default driver
+    ) {
+        $this->driver = strtolower(trim($driver)); // lowercase, trim for safety
+    }
 
     public function getConnection(): ?PDO
     {
         try {
             if ($this->connect === null) {
-                $this->connect = new PDO(
-                    "mysql:host=$this->host;port=$this->port;dbname={$this->dbname}",
-                    $this->user,
-                    $this->password
-                );
+                $dsn = $this->getDsn();
+                $this->connect = new PDO($dsn, $this->user, $this->password);
                 $this->connect->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
                 $this->connect->setAttribute(PDO::ATTR_EMULATE_PREPARES, false);
                 $this->connect->setAttribute(PDO::ATTR_STRINGIFY_FETCHES, false);
             }
             return $this->connect;
         } catch (PDOException $e) {
-            // Hibaüzenet összeállítása
             $errorMessage = sprintf(
-                "[%s] Hiba történt az adatbázis kapcsolat létrehozása közben:\nFájl: %s\nFunkció: %s\nHibaüzenet: %s\n",
+                "[%s] An error occurred while establishing a database connection:\File: %a\Function: %s\nDriver: %s\nError message: %s\n",
                 date('Y-m-d H:i:s'),
                 __FILE__,
-                debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 2)[1]['function'] ?? 'ismeretlen',
+                debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 2)[1]['function'] ?? 'unknown',
+                $this->driver,
                 $e->getMessage()
             );
 
-            // Konzolra kiírás
             echo $errorMessage;
-
-            // Naplózás fájlba és rendszernaplóba
             $this->log($errorMessage);
-
-            // Hibát dobunk, ha szükséges
-            die("Connection failed. Részletek a logban találhatók.");
+            die("Connection error [".basename(__FILE__)."]. Details have been logged.");
         }
+    }
+
+    private function getDsn(): string
+    {
+        return match ($this->driver) {
+            'mysql' => "mysql:host=$this->host;port=$this->port;dbname=$this->dbname;charset=utf8mb4",
+            'pgsql' => "pgsql:host=$this->host;port=$this->port;dbname=$this->dbname",
+            default => throw new PDOException("Unsupported driver: $this->driver"),
+        };
     }
 
     private function log(string $message): void
     {
-        // Fájlnaplózás
         $logFile = __DIR__ . '/error_log.txt';
         file_put_contents($logFile, $message, FILE_APPEND);
+        error_log($message, 0);
+    }
 
-        // Rendszernaplózás `error_log()` segítségével
-        error_log($message, 0); // Az üzenet az alapértelmezett rendszernaplóba kerül (pl. syslog)
+    public function getDriver(): string
+    {
+        return $this->driver;
     }
 
     public function __destruct()
     {
-        $this->connect = null; // PDO kapcsolat explicit lezárása
+        $this->connect = null;
     }
 }
 
 ?>
- 
