@@ -1,21 +1,13 @@
 {
-    "name": "hunnomad/classdatabase",
-    "description": "Universal MySQL database connection class",
-    "type": "library",
-    "license": "MIT",
-    "authors": [
-      {
-        "name": "Zsolt Boszormenyi",
-        "email": "hunnomad@gmail.com"
-      }
-    ],
-    "autoload": {
-      "psr-4": {
-        "HunNomad\\Database\\": "src/"
-      }
-    },
-    "require": {
-      "php": ">=8.0",
-      "ext-pdo": "*"
-    }
+  "name": "hunnomad/classdatabase",
+  "description": "Lightweight multi-driver database wrapper",
+  "type": "library",
+  "license": "MIT",
+  "autoload": { "psr-4": { "HunNomad\\Database\\": "src/" } },
+  "require": {
+    "php": ">=8.0",
+    "ext-pdo": "*",
+    "ext-redis": "*",
+    "mongodb/mongodb": "^1.19"
   }
+}
