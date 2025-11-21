@@ -150,4 +150,4 @@ classdatabase/
 
 ## License
 MIT License  
-© 2025 HunNomad (Zsolt Kállai)
+© 2025 HunNomad (Zsolt Boszormenyi)
