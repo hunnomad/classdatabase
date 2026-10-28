@@ -4,9 +4,11 @@ namespace HunNomad\Database;
 
 use PDO;
 use PDOException;
+use PDOStatement;
 use Redis;
 use MongoDB\Client as MongoClient;
 use Exception;
+use RuntimeException;
 
 class Database
 {
@@ -26,33 +28,35 @@ class Database
 
     /**
      * Lazy connection getter – PDO / MongoClient / Redis
+     *
+     * @throws RuntimeException ha a kapcsolat nem jön létre (az eredeti hiba a getPrevious()-ban)
      */
     public function getConnection(): mixed
     {
+        if ($this->connect !== null) {
+            return $this->connect;
+        }
+
         try {
-            if ($this->connect === null) {
-                $this->connect = match ($this->driver) {
-                    'mysql', 'pgsql', 'mssql', 'sqlsrv', 'oracle' => $this->pdoConnection(),
-                    'mongodb'                                            => $this->mongoConnection(),
-                    'redis'                                              => $this->redisConnection(),
-                    default                                              => throw new PDOException("Unsupported driver: {$this->driver}"),
-                };
-            }
+            $this->connect = match ($this->driver) {
+                'mysql', 'pgsql', 'mssql', 'sqlsrv', 'oracle' => $this->pdoConnection(),
+                'mongodb'                                     => $this->mongoConnection(),
+                'redis'                                       => $this->redisConnection(),
+                default                                       => throw new RuntimeException("Unsupported driver: {$this->driver}"),
+            };
             return $this->connect;
         } catch (Exception $e) {
-            $errorMessage = sprintf(
-                "[%s] Database connection error\nFile: %s\nLine: %d\nDriver: %s\nFunction: %s\nError: %s\n",
+            $this->log(sprintf(
+                "[%s] Database connection error\nDriver: %s\nFile: %s\nLine: %d\nError: %s\n",
                 date('Y-m-d H:i:s'),
-                __FILE__,
-                __LINE__,
                 $this->driver,
-                debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 2)[1]['function'] ?? 'unknown',
+                $e->getFile(),
+                $e->getLine(),
                 $e->getMessage()
-            );
+            ));
 
-            echo $errorMessage;
-            $this->log($errorMessage);
-            die("Connection error [" . basename(__FILE__) . "]. Details have been logged.");
+            // Könyvtárként nem echo-zunk és nem die()-olunk: a hívó dönti el, mi legyen
+            throw new RuntimeException("Database connection error ({$this->driver}): " . $e->getMessage(), 0, $e);
         }
     }
 
@@ -82,8 +86,18 @@ class Database
      */
     private function mongoConnection(): MongoClient
     {
-        $uri = "mongodb://{$this->user}:{$this->password}@{$this->host}:{$this->port}/{$this->dbname}";
-        return new MongoClient($uri);
+        $uri     = "mongodb://{$this->host}:{$this->port}";
+        $options = [];
+
+        // Hitelesítés URI-opcióként: így a speciális karaktereket nem kell escapelni,
+        // és felhasználó nélkül sem jön létre érvénytelen "mongodb://:@host" URI
+        if ($this->user !== '') {
+            $options['username']   = $this->user;
+            $options['password']   = $this->password;
+            $options['authSource'] = $this->dbname !== '' ? $this->dbname : 'admin';
+        }
+
+        return new MongoClient($uri, $options);
     }
 
     /**
@@ -92,20 +106,24 @@ class Database
     private function redisConnection(): Redis
     {
         $redis = new Redis();
-        $redis->connect($this->host, (int) $this->port);
+        if (!$redis->connect($this->host, (int) $this->port)) {
+            throw new RuntimeException("Could not connect to Redis at {$this->host}:{$this->port}");
+        }
         if ($this->password !== '') {
-            $redis->auth($this->password);
+            // Redis 6+ ACL: felhasználónév + jelszó, egyébként csak jelszó
+            $auth = $this->user !== '' ? [$this->user, $this->password] : $this->password;
+            if (!$redis->auth($auth)) {
+                throw new RuntimeException("Redis authentication failed");
+            }
         }
         return $redis;
     }
 
     /**
-     * Simple error logger (file + PHP error_log)
+     * Simple error logger (PHP error_log – nem ír a vendor könyvtárba)
      */
     private function log(string $message): void
     {
-        $logFile = __DIR__ . '/error_log.txt';
-        file_put_contents($logFile, $message, FILE_APPEND);
         error_log($message, 0);
     }
 
@@ -144,6 +162,54 @@ class Database
         return $client;
     }
 
+    /**
+     * WHERE feltétel indexelt placeholderekkel (pl. "u.id" oszlopnévnél is érvényes paraméternév)
+     */
+    private function buildWhere(array $conditions, array &$params): string
+    {
+        $parts = [];
+        foreach ($conditions as $col => $val) {
+            $param          = 'w' . count($params);
+            $parts[]        = "{$col} = :{$param}";
+            $params[$param] = $val;
+        }
+        return implode(' AND ', $parts);
+    }
+
+    /**
+     * LIMIT / OFFSET driverfüggő szintaxissal
+     */
+    private function buildLimit(string $sql, array $options): string
+    {
+        if (!isset($options['limit'])) {
+            return $sql;
+        }
+
+        $limit  = (int) $options['limit'];
+        $offset = (int) ($options['offset'] ?? 0);
+
+        if (in_array($this->driver, ['mssql', 'sqlsrv', 'oracle'], true)) {
+            // SQL Server-en az OFFSET/FETCH csak ORDER BY-jal érvényes
+            if ($this->driver !== 'oracle' && empty($options['order'])) {
+                $sql .= " ORDER BY (SELECT NULL)";
+            }
+            return $sql . " OFFSET {$offset} ROWS FETCH NEXT {$limit} ROWS ONLY";
+        }
+
+        $sql .= " LIMIT {$limit}";
+        if (isset($options['offset'])) {
+            $sql .= " OFFSET {$offset}";
+        }
+        return $sql;
+    }
+
+    private function bindAll(PDOStatement $stmt, array $params): void
+    {
+        foreach ($params as $name => $val) {
+            $stmt->bindValue(':' . $name, $val);
+        }
+    }
+
     /* =========================================================
      *  CRUD – INSERT
      * ========================================================= */
@@ -158,23 +224,31 @@ class Database
      */
     public function insert(string $table, array $data): mixed
     {
+        if (empty($data)) {
+            throw new Exception("insert() requires at least one column.");
+        }
+
         if ($this->isPdoDriver()) {
-            $pdo  = $this->ensurePdo();
-            $cols = array_keys($data);
+            $pdo    = $this->ensurePdo();
+            $cols   = array_keys($data);
+            $params = [];
+
+            foreach (array_values($data) as $i => $val) {
+                $params['v' . $i] = $val;
+            }
 
             // MEGJEGYZÉS: $table és oszlopnevek NE legyenek user inputból!
-            $placeholders = array_map(fn($c) => ':' . $c, $cols);
+            $placeholders = array_map(fn($p) => ':' . $p, array_keys($params));
             $sql = "INSERT INTO {$table} (" . implode(',', $cols) . ")
                     VALUES (" . implode(',', $placeholders) . ")";
 
             $stmt = $pdo->prepare($sql);
-            foreach ($data as $col => $val) {
-                $stmt->bindValue(':' . $col, $val);
-            }
+            $this->bindAll($stmt, $params);
             $stmt->execute();
 
             try {
-                return $pdo->lastInsertId();
+                $id = $pdo->lastInsertId();
+                return $id === false ? null : $id;
             } catch (PDOException) {
                 // Ha a driver nem támogatja a lastInsertId-t
                 return null;
@@ -220,30 +294,17 @@ class Database
             $params = [];
 
             if (!empty($conditions)) {
-                $whereParts = [];
-                foreach ($conditions as $col => $val) {
-                    $param           = 'w_' . $col;
-                    $whereParts[]    = "{$col} = :{$param}";
-                    $params[$param]  = $val;
-                }
-                $sql .= " WHERE " . implode(' AND ', $whereParts);
+                $sql .= " WHERE " . $this->buildWhere($conditions, $params);
             }
 
             if (!empty($options['order'])) {
                 $sql .= " ORDER BY " . $options['order'];
             }
 
-            if (isset($options['limit'])) {
-                $sql .= " LIMIT " . (int) $options['limit'];
-                if (isset($options['offset'])) {
-                    $sql .= " OFFSET " . (int) $options['offset'];
-                }
-            }
+            $sql = $this->buildLimit($sql, $options);
 
             $stmt = $pdo->prepare($sql);
-            foreach ($params as $name => $val) {
-                $stmt->bindValue(':' . $name, $val);
-            }
+            $this->bindAll($stmt, $params);
 
             $stmt->execute();
             return $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -266,7 +327,7 @@ class Database
 
             if (!empty($options['order'])) {
                 // pl. "field DESC" vagy "field ASC"
-                $parts = explode(' ', $options['order']);
+                $parts = preg_split('/\s+/', trim($options['order']));
                 $field = $parts[0] ?? null;
                 $dir   = strtoupper($parts[1] ?? 'ASC');
                 if ($field) {
@@ -308,36 +369,31 @@ class Database
      */
     public function update(string $table, array $data, array $conditions): int
     {
+        if (empty($data)) {
+            throw new Exception("update() requires at least one column to set.");
+        }
+
         if ($this->isPdoDriver()) {
+            if (empty($conditions)) {
+                throw new Exception("Refusing to run UPDATE without WHERE conditions.");
+            }
+
             $pdo = $this->ensurePdo();
 
             $setParts = [];
             $params   = [];
 
             foreach ($data as $col => $val) {
-                $param          = 's_' . $col;
+                $param          = 's' . count($params);
                 $setParts[]     = "{$col} = :{$param}";
                 $params[$param] = $val;
             }
 
-            $whereParts = [];
-            foreach ($conditions as $col => $val) {
-                $param           = 'w_' . $col;
-                $whereParts[]    = "{$col} = :{$param}";
-                $params[$param]  = $val;
-            }
-
-            if (empty($whereParts)) {
-                throw new Exception("Refusing to run UPDATE without WHERE conditions.");
-            }
-
             $sql = "UPDATE {$table} SET " . implode(', ', $setParts)
-                 . " WHERE " . implode(' AND ', $whereParts);
+                 . " WHERE " . $this->buildWhere($conditions, $params);
 
             $stmt = $pdo->prepare($sql);
-            foreach ($params as $name => $val) {
-                $stmt->bindValue(':' . $name, $val);
-            }
+            $this->bindAll($stmt, $params);
 
             $stmt->execute();
             return $stmt->rowCount();
@@ -351,7 +407,7 @@ class Database
             $update = ['$set' => $data];
 
             $result = $collection->updateMany($filter, $update);
-            return $result->getModifiedCount();
+            return (int) $result->getModifiedCount();
         }
 
         if ($this->driver === 'redis') {
@@ -376,27 +432,16 @@ class Database
     public function delete(string $table, array $conditions): int
     {
         if ($this->isPdoDriver()) {
-            $pdo = $this->ensurePdo();
-
             if (empty($conditions)) {
                 throw new Exception("Refusing to run DELETE without WHERE conditions.");
             }
 
-            $whereParts = [];
-            $params     = [];
-
-            foreach ($conditions as $col => $val) {
-                $param           = 'w_' . $col;
-                $whereParts[]    = "{$col} = :{$param}";
-                $params[$param]  = $val;
-            }
-
-            $sql = "DELETE FROM {$table} WHERE " . implode(' AND ', $whereParts);
+            $pdo    = $this->ensurePdo();
+            $params = [];
+            $sql    = "DELETE FROM {$table} WHERE " . $this->buildWhere($conditions, $params);
 
             $stmt = $pdo->prepare($sql);
-            foreach ($params as $name => $val) {
-                $stmt->bindValue(':' . $name, $val);
-            }
+            $this->bindAll($stmt, $params);
 
             $stmt->execute();
             return $stmt->rowCount();
@@ -409,7 +454,7 @@ class Database
             $filter = $conditions;
             $result = $collection->deleteMany($filter);
 
-            return $result->getDeletedCount();
+            return (int) $result->getDeletedCount();
         }
 
         if ($this->driver === 'redis') {
@@ -426,11 +471,11 @@ class Database
     /**
      * rawQuery – bármilyen SQL lefuttatása PDO-n
      *
-     * - Ha SELECT/SHOW/DESCRIBE/PRAGMA/WITH: tömböt ad vissza
+     * - Ha a lekérdezés eredményhalmazt ad (SELECT, SHOW, WITH, ... RETURNING): tömböt ad vissza
      * - Egyébként: rowCount() (int)
      *
      * @param string $sql
-     * @param array  $params  asszociatív (':id'=>1 vagy 'id'=>1) / numerikus ([1=>'val', ...])
+     * @param array  $params  asszociatív (':id'=>1 vagy 'id'=>1) / pozicionális (['a', 'b'] vagy [1=>'a', 2=>'b'])
      * @return array|int
      * @throws Exception
      */
@@ -439,24 +484,22 @@ class Database
         $pdo  = $this->ensurePdo();
         $stmt = $pdo->prepare($sql);
 
+        // 0-tól indexelt lista -> 1-based pozíció; egyébként a kulcs már 1-based
+        $isList = $params === array_values($params);
+
         foreach ($params as $key => $value) {
             if (is_int($key)) {
-                // numerikus param: 0-based -> 1-based
-                $stmt->bindValue($key + 1, $value);
+                $stmt->bindValue($isList ? $key + 1 : $key, $value);
             } else {
-                $paramName = $key;
-                if ($paramName[0] !== ':') {
-                    $paramName = ':' . $paramName;
-                }
+                $paramName = str_starts_with($key, ':') ? $key : ':' . $key;
                 $stmt->bindValue($paramName, $value);
             }
         }
 
         $stmt->execute();
 
-        $operation = strtolower(strtok(ltrim($sql), " \t\n\r"));
-
-        if (in_array($operation, ['select', 'show', 'describe', 'pragma', 'with'], true)) {
+        // Van eredményhalmaz? (megbízhatóbb, mint az SQL első szavának vizsgálata)
+        if ($stmt->columnCount() > 0) {
             return $stmt->fetchAll(PDO::FETCH_ASSOC);
         }
 
@@ -505,4 +548,3 @@ class Database
         $this->connect = null;
     }
 }
-
